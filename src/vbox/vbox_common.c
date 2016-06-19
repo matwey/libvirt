@@ -149,6 +149,8 @@ int vboxRegisterUniformedAPI(uint32_t uVersion)
         vbox43InstallUniformedAPI(&gVBoxAPI);
     } else if (uVersion >= 4003004 && uVersion < 4003051) {
         vbox43_4InstallUniformedAPI(&gVBoxAPI);
+    } else if (uVersion >= 4003051 && uVersion < 5000051) {
+        vbox50InstallUniformedAPI(&gVBoxAPI);
     } else {
         return -1;
     }

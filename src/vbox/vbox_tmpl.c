@@ -83,6 +83,8 @@
 # include "vbox_CAPI_v4_3.h"
 #elif VBOX_API_VERSION == 4003004
 # include "vbox_CAPI_v4_3_4.h"
+#elif VBOX_API_VERSION == 5000000
+# include "vbox_CAPI_v5_0.h"
 #else
 # error "Unsupport VBOX_API_VERSION"
 #endif
@@ -1420,7 +1422,9 @@ _vboxDomainSnapshotRestore(virDomainPtr dom,
                           ISnapshot *snapshot)
 {
     VBOX_OBJECT_CHECK(dom->conn, int, -1);
+# if VBOX_API_VERSION < 5000000
     IConsole *console = NULL;
+# endif /*VBOX_API_VERSION < 5000000*/
     IProgress *progress = NULL;
     PRUint32 state;
     nsresult rc;
@@ -1449,8 +1453,10 @@ _vboxDomainSnapshotRestore(virDomainPtr dom,
     }
 
     rc = VBOX_SESSION_OPEN(domiid.value, machine);
+# if VBOX_API_VERSION < 5000000
     if (NS_SUCCEEDED(rc))
         rc = data->vboxSession->vtbl->GetConsole(data->vboxSession, &console);
+# endif /*VBOX_API_VERSION < 5000000*/
     if (NS_FAILED(rc)) {
         virReportError(VIR_ERR_INTERNAL_ERROR,
                        _("could not open VirtualBox session with domain %s"),
@@ -1458,7 +1464,12 @@ _vboxDomainSnapshotRestore(virDomainPtr dom,
         goto cleanup;
     }
 
+# if VBOX_API_VERSION < 5000000
     rc = console->vtbl->RestoreSnapshot(console, snapshot, &progress);
+# elif VBOX_API_VERSION >= 5000000  /*VBOX_API_VERSION < 5000000*/
+    rc = machine->vtbl->RestoreSnapshot(machine, snapshot, &progress);
+# endif /*VBOX_API_VERSION >= 5000000*/
+
     if (NS_FAILED(rc) || !progress) {
         if (rc == VBOX_E_INVALID_VM_STATE) {
             virReportError(VIR_ERR_OPERATION_INVALID, "%s",
@@ -1483,7 +1494,9 @@ _vboxDomainSnapshotRestore(virDomainPtr dom,
 
  cleanup:
     VBOX_RELEASE(progress);
+# if VBOX_API_VERSION < 5000000
     VBOX_RELEASE(console);
+# endif /*VBOX_API_VERSION < 5000000*/
     VBOX_SESSION_CLOSE();
     vboxIIDUnalloc(&domiid);
     return ret;
@@ -3279,7 +3292,11 @@ static virStorageVolPtr vboxStorageVolCreateXML(virStoragePoolPtr pool,
     if (hddFormatUtf16 && hddNameUtf16) {
         IHardDisk *hardDisk = NULL;
 
+#if VBOX_API_VERSION < 5000000 /* VBOX_API_VERSION >= 3001000 */
         rc = data->vboxObj->vtbl->CreateHardDisk(data->vboxObj, hddFormatUtf16, hddNameUtf16, &hardDisk);
+#else
+        rc = data->vboxObj->vtbl->CreateMedium(data->vboxObj, hddFormatUtf16, hddNameUtf16, AccessMode_ReadWrite, DeviceType_HardDisk, &hardDisk);
+#endif /* VBOX_API_VERSION >= 5000000 */
         if (NS_SUCCEEDED(rc)) {
             IProgress *progress    = NULL;
             PRUint64   logicalSize = VIR_DIV_UP(def->target.capacity,
@@ -4650,9 +4667,11 @@ _virtualboxCreateHardDiskMedium(IVirtualBox *vboxObj ATTRIBUTE_UNUSED,
 #if VBOX_API_VERSION < 3001000
     vboxUnsupported();
     return 0;
-#else /* VBOX_API_VERSION >= 3001000 */
+#elif VBOX_API_VERSION < 5000000 /* VBOX_API_VERSION >= 3001000 */
     return vboxObj->vtbl->CreateHardDisk(vboxObj, format, location, medium);
-#endif /* VBOX_API_VERSION >= 3001000 */
+#else
+    return vboxObj->vtbl->CreateMedium(vboxObj, format, location, AccessMode_ReadWrite, DeviceType_HardDisk, medium);
+#endif /* VBOX_API_VERSION >= 5000000 */
 }
 
 static nsresult
@@ -5100,7 +5119,23 @@ _sessionGetMachine(ISession *session, IMachine **machine)
 static nsresult
 _consoleSaveState(IConsole *console, IProgress **progress)
 {
+#if VBOX_API_VERSION < 5000000
     return console->vtbl->SaveState(console, progress);
+#else /*VBOX_API_VERSION < 5000000*/
+    IMachine *machine;
+    nsresult rc;
+
+    rc = console->vtbl->GetMachine(console, &machine);
+
+    if (NS_SUCCEEDED(rc))
+        rc = machine->vtbl->SaveState(machine, progress);
+    else
+        virReportError(VIR_ERR_INTERNAL_ERROR,
+                       _("unable to get machine from console. (error %d)"), rc);
+
+    return rc;
+
+#endif /*VBOX_API_VERSION >= 5000000*/
 }
 
 static nsresult
@@ -5148,7 +5183,25 @@ static nsresult
 _consoleTakeSnapshot(IConsole *console, PRUnichar *name,
                      PRUnichar *description, IProgress **progress)
 {
+#if VBOX_API_VERSION < 5000000
     return console->vtbl->TakeSnapshot(console, name, description, progress);
+#else
+    IMachine *machine;
+    nsresult rc;
+    PRUnichar *id = NULL;
+    bool bpause = true; /*NO live snapshot*/
+
+    rc = console->vtbl->GetMachine(console, &machine);
+
+    if (NS_SUCCEEDED(rc))
+        rc = machine->vtbl->TakeSnapshot(machine, name, description, bpause, &id, progress);
+    else
+        virReportError(VIR_ERR_INTERNAL_ERROR,
+                       _("unable to get machine from console. (error %d)"), rc);
+
+    VBOX_RELEASE(machine);
+    return rc;
+#endif /* VBOX_API_VERSION >= 5000000 */
 }
 
 static nsresult
@@ -5156,9 +5209,24 @@ _consoleDeleteSnapshot(IConsole *console, vboxIIDUnion *iidu, IProgress **progre
 {
 #if VBOX_API_VERSION < 3001000
     return console->vtbl->DiscardSnapshot(console, IID_MEMBER(value), progress);
-#else /* VBOX_API_VERSION >= 3001000 */
+#elif VBOX_API_VERSION >= 3001000 && VBOX_API_VERSION < 5000000 /* VBOX_API_VERSION >= 3001000 */
     return console->vtbl->DeleteSnapshot(console, IID_MEMBER(value), progress);
-#endif /* VBOX_API_VERSION >= 3001000 */
+#else /* VBOX_API_VERSION >= 5000000 */
+    IMachine *machine;
+    nsresult rc;
+
+    rc = console->vtbl->GetMachine(console, &machine);
+
+    if (NS_SUCCEEDED(rc))
+        rc = machine->vtbl->DeleteSnapshot(machine, IID_MEMBER(value), progress);
+    else
+        virReportError(VIR_ERR_INTERNAL_ERROR,
+                       _("unable to get machine from console. (error %d)"), rc);
+
+    VBOX_RELEASE(machine);
+
+    return rc;
+#endif /* VBOX_API_VERSION >= 5000000 */
 }
 
 static nsresult
@@ -6048,11 +6116,17 @@ _displayGetScreenResolution(IDisplay *display ATTRIBUTE_UNUSED,
 #elif VBOX_API_VERSION < 4003000
     return display->vtbl->GetScreenResolution(display, screenId, width,
                                               height, bitsPerPixel);
-#else /* VBOX_API_VERSION >= 4003000 */
+#elif VBOX_API_VERSION < 5000000 /* VBOX_API_VERSION >= 4003000 */
     return display->vtbl->GetScreenResolution(display, screenId, width,
                                               height, bitsPerPixel,
                                               xOrigin, yOrigin);
-#endif /* VBOX_API_VERSION >= 4003000 */
+#else /*VBOX_API_VERSION >= 5000000 */
+    PRUint32 gms;
+
+    return display->vtbl->GetScreenResolution(display, screenId, width,
+                                              height, bitsPerPixel,
+                                              xOrigin, yOrigin, &gms);
+#endif /* VBOX_API_VERSION >= 5000000 */
 }
 
 static nsresult
@@ -6063,10 +6137,10 @@ _displayTakeScreenShotPNGToArray(IDisplay *display ATTRIBUTE_UNUSED,
                                  PRUint32 *screenDataSize ATTRIBUTE_UNUSED,
                                  PRUint8** screenData ATTRIBUTE_UNUSED)
 {
-#if VBOX_API_VERSION < 4000000
+#if VBOX_API_VERSION < 4000000 || VBOX_API_VERSION >= 5000000
     vboxUnsupported();
     return 0;
-#else /* VBOX_API_VERSION >= 4000000 */
+#else /* VBOX_API_VERSION >= 4000000 && VBOX_API_VERSION < 5000000 */
     return display->vtbl->TakeScreenShotPNGToArray(display, screenId, width,
                                                    height, screenDataSize,
                                                    screenData);
